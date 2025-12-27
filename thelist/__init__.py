@@ -1,4 +1,4 @@
-from .the_list import TheList
+from .thelist import TheList
 
 
 async def setup(bot):
