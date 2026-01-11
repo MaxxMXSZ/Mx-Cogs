@@ -11,6 +11,83 @@ from redbot.core import commands, Config
 class ListEntry:
     user_id: int
     covered: bool = False
+    plus_one_used: bool = False
+
+
+class ListPaginator(discord.ui.View):
+    def __init__(self, author_id: int, embeds: List[discord.Embed]):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.embeds = embeds
+        self.page_index = 0
+        self.message: Optional[discord.Message] = None
+        self._update_button_states()
+
+    def _update_button_states(self) -> None:
+        first_page = self.page_index == 0
+        last_page = self.page_index == len(self.embeds) - 1
+        self.first_page.disabled = first_page
+        self.back_page.disabled = first_page
+        self.next_page.disabled = last_page
+        self.last_page.disabled = last_page
+
+    async def _show_page(self, interaction: discord.Interaction) -> None:
+        self._update_button_states()
+        await interaction.response.edit_message(embed=self.embeds[self.page_index], view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This menu isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="<<", style=discord.ButtonStyle.secondary)
+    async def first_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.page_index = 0
+        await self._show_page(interaction)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.primary)
+    async def back_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.page_index > 0:
+            self.page_index -= 1
+        await self._show_page(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.page_index < len(self.embeds) - 1:
+            self.page_index += 1
+        await self._show_page(interaction)
+
+    @discord.ui.button(label=">>", style=discord.ButtonStyle.secondary)
+    async def last_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.page_index = len(self.embeds) - 1
+        await self._show_page(interaction)
+
+    @discord.ui.button(label="Quit", style=discord.ButtonStyle.danger)
+    async def stop_view(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class TheList(commands.Cog):
@@ -86,20 +163,31 @@ class TheList(commands.Cog):
                     display = base_name
 
             if entry.covered:
-                display = f"||{base_name}||"
+                if member:
+                    display = f"||{member.mention}||"
+                else:
+                    display = f"||{base_name}||"
 
             lines.append(f"{index}. {display}")
 
         page_size = 20
         total_pages = (len(lines) + page_size - 1) // page_size
+        embeds = []
         for page_index in range(total_pages):
             start = page_index * page_size
             chunk = lines[start : start + page_size]
             title = "THE list"
             if total_pages > 1:
                 title = f"THE list (Page {page_index + 1}/{total_pages})"
-            embed = discord.Embed(title=title, description="\n".join(chunk))
-            await ctx.send(embed=embed)
+            embeds.append(discord.Embed(title=title, description="\n".join(chunk)))
+
+        if total_pages == 1:
+            await ctx.send(embed=embeds[0])
+            return
+
+        view = ListPaginator(ctx.author.id, embeds)
+        message = await ctx.send(embed=embeds[0], view=view)
+        view.message = message
 
     @list_group.command(name="setrole")
     @commands.guild_only()
@@ -145,6 +233,39 @@ class TheList(commands.Cog):
         entries.append(ListEntry(user_id=user_id, covered=False))
         await self._set_entries(ctx.guild, entries)
         await ctx.send(f"Chat <@{user_id}> has been added to THE list.💀😭")
+
+    @list_group.command(name="plusone")
+    @commands.guild_only()
+    async def list_plusone(
+        self,
+        ctx: commands.Context,
+        user: Union[discord.Member, int],
+    ) -> None:
+        """Invite a plus one fam"""
+        target_id = user.id if isinstance(user, discord.Member) else int(user)
+        if target_id == 718365766671663144:
+            await ctx.send("You thought you could add me LMAO")
+            return
+
+        entries = await self._get_entries(ctx.guild)
+        inviter_entry = next(
+            (entry for entry in entries if entry.user_id == ctx.author.id),
+            None,
+        )
+        if inviter_entry is None:
+            await ctx.send("Lil bro you aint even on THE list.")
+            return
+        if inviter_entry.plus_one_used:
+            await ctx.send("You already invited a plus one bro")
+            return
+        if any(entry.user_id == target_id for entry in entries):
+            await ctx.send("Lil bro the guy is already on THE list.")
+            return
+
+        entries.append(ListEntry(user_id=target_id, covered=False))
+        inviter_entry.plus_one_used = True
+        await self._set_entries(ctx.guild, entries)
+        await ctx.send(f"Plus one added: <@{target_id}>.")
 
     @list_group.command(name="cover")
     @commands.guild_only()
