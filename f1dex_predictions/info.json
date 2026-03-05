@@ -1,0 +1,14 @@
+{
+  "author": [
+    "Mx"
+  ],
+  "description": "F1dex prediction championship with buttons, scoring, and leaderboards.",
+  "install_msg": "F1dex Predictions loaded. Configure channels with [p]f1pred admin commands.",
+  "short": "F1 prediction championship",
+  "tags": [
+    "f1",
+    "predictions",
+    "championship"
+  ],
+  "type": "COG"
+}
