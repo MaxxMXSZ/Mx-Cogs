@@ -1080,6 +1080,18 @@ class F1DexPredictions(commands.Cog):
             return
         await self._reply(interaction, embed=self._build_prediction_embed(interaction.user, round_data, submission))
 
+    def _advanced_is_retryable(self, advanced: Optional[Dict[str, Any]], round_data: Dict[str, Any]) -> bool:
+        if not advanced:
+            return False
+        detection = advanced.get("bold_detection")
+        if detection and detection.get("type") == "unknown":
+            return True
+        if not detection:
+            reparsed = self._detect_bold_prediction(advanced.get("bold_text", ""), round_data)
+            if reparsed.get("type") == "unknown":
+                return True
+        return False
+
     async def open_core_modal(self, interaction: discord.Interaction) -> None:
         round_id, round_data, _ = await self._ensure_round_open(interaction)
         if not round_id or not round_data:
@@ -1093,7 +1105,8 @@ class F1DexPredictions(commands.Cog):
         round_id, round_data, _ = await self._ensure_round_open(interaction)
         if not round_id or not round_data:
             return
-        if round_data.get("submissions", {}).get(str(interaction.user.id), {}).get("advanced"):
+        existing_advanced = round_data.get("submissions", {}).get(str(interaction.user.id), {}).get("advanced")
+        if existing_advanced and not self._advanced_is_retryable(existing_advanced, round_data):
             await self._reply(interaction, "Advanced is already submitted and locked.")
             return
         await interaction.response.send_modal(AdvancedPredictionModal(self))
@@ -1159,10 +1172,23 @@ class F1DexPredictions(commands.Cog):
                 return
             user_id = str(interaction.user.id)
             sub = round_data.setdefault("submissions", {}).setdefault(user_id, {})
-            if sub.get("advanced"):
+            had_retryable_advanced = bool(
+                sub.get("advanced") and self._advanced_is_retryable(sub.get("advanced"), round_data)
+            )
+            if sub.get("advanced") and not had_retryable_advanced:
                 await self._reply(interaction, "Advanced is already submitted and locked.")
                 return
             detect = self._detect_bold_prediction(payload["bold_text"], round_data)
+            if detect.get("type") == "unknown":
+                await self._reply(
+                    interaction,
+                    (
+                        "Your bold prediction was not recognized, so this section was not saved.\n"
+                        "Please rewrite it with clearer keywords and submit again. "
+                        "Use `[p]f1pred boldhelp` for examples."
+                    ),
+                )
+                return
             adv = {
                 "flop_driver": payload["flop_driver"],
                 "flop_team": payload["flop_team"],
@@ -1179,7 +1205,8 @@ class F1DexPredictions(commands.Cog):
             )
         p = detect.get("probability", 1.0)
         extra = "Not bold enough (>30%)." if p > 0.30 else f"Detected: {detect.get('label')} ({int(p * 100)}%)."
-        await self._reply(interaction, f"Advanced submitted and locked. {extra}")
+        prefix = "Advanced resubmitted and locked. " if had_retryable_advanced else "Advanced submitted and locked. "
+        await self._reply(interaction, f"{prefix}{extra}")
 
     async def handle_qotw_submit(self, interaction: discord.Interaction, payload: Dict[str, str]) -> None:
         async with self._write_lock:
