@@ -895,20 +895,132 @@ class F1DexPredictions(commands.Cog):
             return None, None, None
         return round_id, round_data, rounds
 
-    async def _build_and_send_log(self, guild: discord.Guild, round_data: Dict[str, Any], user: discord.abc.User, section: str, values: Dict[str, Any]) -> None:
+    def _yn(self, value: Any) -> str:
+        if value is True:
+            return "Y"
+        if value is False:
+            return "N"
+        return "?"
+
+    def _build_submission_log_embed(
+        self,
+        user: discord.abc.User,
+        round_data: Dict[str, Any],
+        submission: Dict[str, Any],
+        updated_section: str,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="F1dex Prediction Log",
+            description=f"Single submission log entry (auto-edited on updates).",
+            color=EMBED_DARK,
+            timestamp=utcnow(),
+        )
+        embed.add_field(name="User", value=user.mention, inline=True)
+        embed.add_field(name="Round", value=round_data.get("name", "Unknown"), inline=True)
+        embed.add_field(name="Updated Section", value=updated_section.title(), inline=True)
+
+        sections = ["core", "advanced", "qotw"]
+        if round_data.get("sprint_enabled"):
+            sections.append("sprint")
+        completed = sum(1 for key in sections if submission.get(key))
+        embed.add_field(name="Progress", value=f"{completed}/{len(sections)} sections submitted", inline=False)
+
+        core = submission.get("core")
+        if core:
+            core_value = (
+                f"P1: {core.get('p1')}\n"
+                f"P2: {core.get('p2')}\n"
+                f"P3: {core.get('p3')}\n"
+                f"Pole: {core.get('pole')}\n"
+                f"Safety Car: {self._yn(core.get('safety_car'))}"
+            )
+        else:
+            core_value = "Not submitted."
+        embed.add_field(name="Core", value=core_value, inline=False)
+
+        advanced = submission.get("advanced")
+        if advanced:
+            detection = advanced.get("bold_detection", {})
+            advanced_value = (
+                f"Flop Driver: {advanced.get('flop_driver')}\n"
+                f"Flop Team: {advanced.get('flop_team')}\n"
+                f"Surprise Driver: {advanced.get('surprise_driver')}\n"
+                f"Surprise Team: {advanced.get('surprise_team')}\n"
+                f"Bold: {advanced.get('bold_text')}\n"
+                f"Detected: {detection.get('label', 'Unknown')} ({int(float(detection.get('probability', 1.0)) * 100)}%)"
+            )
+        else:
+            advanced_value = "Not submitted."
+        embed.add_field(name="Advanced", value=advanced_value, inline=False)
+
+        qotw = submission.get("qotw")
+        qotw_prompt = round_data.get("qotw", {}).get("prompt") or "QOTW"
+        if qotw:
+            qotw_answer = qotw.get("answer")
+            if isinstance(qotw_answer, bool):
+                qotw_answer = self._yn(qotw_answer)
+            qotw_value = str(qotw_answer)
+        else:
+            qotw_value = "Not submitted."
+        embed.add_field(name=qotw_prompt, value=qotw_value, inline=False)
+
+        if round_data.get("sprint_enabled"):
+            sprint = submission.get("sprint")
+            if sprint:
+                sprint_value = (
+                    f"P1: {sprint.get('p1')}\n"
+                    f"P2: {sprint.get('p2')}\n"
+                    f"P3: {sprint.get('p3')}\n"
+                    f"Pole: {sprint.get('pole')}\n"
+                    f"Safety Car: {self._yn(sprint.get('safety_car'))}"
+                )
+            else:
+                sprint_value = "Not submitted."
+            embed.add_field(name="Sprint", value=sprint_value, inline=False)
+
+        embed.set_footer(text=f"ID: {round_data.get('round_id')}:{user.id}")
+        return embed
+
+    async def _upsert_submission_log(
+        self,
+        guild: discord.Guild,
+        round_id: str,
+        round_data: Dict[str, Any],
+        rounds: Dict[str, Any],
+        user: discord.abc.User,
+        updated_section: str,
+    ) -> None:
         channel = self._resolve_text_channel(guild, await self.config.guild(guild).log_channel_id())
         if not channel:
             return
-        embed = discord.Embed(title="F1dex Prediction Log", color=EMBED_DARK, timestamp=utcnow())
-        embed.add_field(name="User", value=user.mention, inline=True)
-        embed.add_field(name="Round", value=round_data.get("name", "Unknown"), inline=True)
-        embed.add_field(name="Section", value=section.title(), inline=True)
-        embed.description = "\n".join(f"**{k.replace('_', ' ').title()}:** {v}" for k, v in values.items())
-        embed.set_footer(text=f"ID: {round_data.get('round_id')}:{user.id}:{section}")
+
+        submission = round_data.get("submissions", {}).get(str(user.id))
+        if not submission:
+            return
+
+        embed = self._build_submission_log_embed(user, round_data, submission, updated_section)
+        message_id = submission.get("log_message_id")
+
+        if message_id:
+            try:
+                msg = await channel.fetch_message(int(message_id))
+                await msg.edit(embed=embed)
+                submission["log_last_section"] = updated_section
+                submission["log_last_updated_at"] = to_iso(utcnow())
+                await self._save_round(guild, round_id, round_data, rounds)
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+                pass
+
         try:
-            await channel.send(embed=embed)
+            msg = await channel.send(embed=embed)
         except discord.HTTPException:
-            pass
+            return
+
+        submission["log_message_id"] = msg.id
+        submission["log_last_section"] = updated_section
+        submission["log_last_updated_at"] = to_iso(utcnow())
+        await self._save_round(guild, round_id, round_data, rounds)
 
     def _build_prediction_embed(self, user: discord.abc.User, round_data: Dict[str, Any], submission: Dict[str, Any]) -> discord.Embed:
         embed = discord.Embed(title=f"Your Prediction - {round_data.get('name')}", color=EMBED_GOLD)
@@ -1035,7 +1147,9 @@ class F1DexPredictions(commands.Cog):
             }
             sub["core"] = core
             await self._save_round(interaction.guild, round_id, round_data, rounds)
-        await self._build_and_send_log(interaction.guild, round_data, interaction.user, "core", core)
+            await self._upsert_submission_log(
+                interaction.guild, round_id, round_data, rounds, interaction.user, "core"
+            )
         await self._reply(interaction, "Core submitted and locked.")
 
     async def handle_advanced_submit(self, interaction: discord.Interaction, payload: Dict[str, str]) -> None:
@@ -1060,7 +1174,9 @@ class F1DexPredictions(commands.Cog):
             }
             sub["advanced"] = adv
             await self._save_round(interaction.guild, round_id, round_data, rounds)
-        await self._build_and_send_log(interaction.guild, round_data, interaction.user, "advanced", adv)
+            await self._upsert_submission_log(
+                interaction.guild, round_id, round_data, rounds, interaction.user, "advanced"
+            )
         p = detect.get("probability", 1.0)
         extra = "Not bold enough (>30%)." if p > 0.30 else f"Detected: {detect.get('label')} ({int(p * 100)}%)."
         await self._reply(interaction, f"Advanced submitted and locked. {extra}")
@@ -1090,7 +1206,9 @@ class F1DexPredictions(commands.Cog):
             qsub = {"answer": answer, "submitted_at": to_iso(utcnow())}
             sub["qotw"] = qsub
             await self._save_round(interaction.guild, round_id, round_data, rounds)
-        await self._build_and_send_log(interaction.guild, round_data, interaction.user, "qotw", qsub)
+            await self._upsert_submission_log(
+                interaction.guild, round_id, round_data, rounds, interaction.user, "qotw"
+            )
         await self._reply(interaction, "QOTW submitted and locked.")
 
     async def handle_sprint_submit(self, interaction: discord.Interaction, payload: Dict[str, str]) -> None:
@@ -1120,7 +1238,9 @@ class F1DexPredictions(commands.Cog):
             }
             sub["sprint"] = sprint
             await self._save_round(interaction.guild, round_id, round_data, rounds)
-        await self._build_and_send_log(interaction.guild, round_data, interaction.user, "sprint", sprint)
+            await self._upsert_submission_log(
+                interaction.guild, round_id, round_data, rounds, interaction.user, "sprint"
+            )
         await self._reply(interaction, "Sprint submitted and locked.")
 
     def _collect_driver_candidates(self, round_data: Dict[str, Any]) -> Dict[str, str]:
